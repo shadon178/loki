@@ -68,6 +68,7 @@ func NewResultsCacheMetrics(registerer prometheus.Registerer) *ResultsCacheMetri
 
 type CacheGenNumberLoader interface {
 	GetResultsCacheGenNumber(tenantIDs []string) string
+	Stop()
 }
 
 // ResultsCacheConfig is the config for the results cache.
@@ -163,7 +164,7 @@ type resultsCache struct {
 	merger               Merger
 	cacheGenNumberLoader CacheGenNumberLoader
 	shouldCache          ShouldCacheFn
-	parallelismForReq    func(tenantIDs []string, r Request) int
+	parallelismForReq    func(ctx context.Context, tenantIDs []string, r Request) int
 	retentionEnabled     bool
 	metrics              *ResultsCacheMetrics
 }
@@ -183,7 +184,7 @@ func NewResultsCacheMiddleware(
 	extractor Extractor,
 	cacheGenNumberLoader CacheGenNumberLoader,
 	shouldCache ShouldCacheFn,
-	parallelismForReq func(tenantIDs []string, r Request) int,
+	parallelismForReq func(ctx context.Context, tenantIDs []string, r Request) int,
 	retentionEnabled bool,
 	metrics *ResultsCacheMetrics,
 ) (Middleware, error) {
@@ -230,7 +231,8 @@ func (s resultsCache) Do(ctx context.Context, r Request) (Response, error) {
 		response Response
 	)
 
-	maxCacheFreshness := validation.MaxDurationPerTenant(tenantIDs, s.limits.MaxCacheFreshness)
+	cacheFreshnessCapture := func(id string) time.Duration { return s.limits.MaxCacheFreshness(ctx, id) }
+	maxCacheFreshness := validation.MaxDurationPerTenant(tenantIDs, cacheFreshnessCapture)
 	maxCacheTime := int64(model.Now().Add(-maxCacheFreshness))
 	if r.GetStart() > maxCacheTime {
 		return s.next.Do(ctx, r)
@@ -409,7 +411,7 @@ func (s resultsCache) handleHit(ctx context.Context, r Request, extents []Extent
 	if err != nil {
 		return nil, nil, httpgrpc.Errorf(http.StatusBadRequest, err.Error())
 	}
-	reqResps, err = DoRequests(ctx, s.next, requests, s.parallelismForReq(tenantIDs, r))
+	reqResps, err = DoRequests(ctx, s.next, requests, s.parallelismForReq(ctx, tenantIDs, r))
 
 	if err != nil {
 		return nil, nil, err
